@@ -1,0 +1,120 @@
+name: Secure Docker CI Pipeline
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  secure-docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------------------------------
+      #  Checkout Source Code
+      # --------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # --------------------------------------------------
+      #  SAST – CodeQL Scan (GitHub Native)
+      # --------------------------------------------------
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      # --------------------------------------------------
+      #  Dependency Scan (Policy-based)
+      #    Fail only on HIGH / CRITICAL
+      # --------------------------------------------------
+      - name: Dependency Scan (pip-audit)
+        run: |
+          pip install pip-audit
+          pip-audit --severity high --severity critical
+
+      # --------------------------------------------------
+      #  Unit Tests + Code Coverage
+      # --------------------------------------------------
+      - name: Run tests with coverage
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+          pytest --cov=app --cov-report=xml --cov-report=term --cov-fail-under=70
+
+      # --------------------------------------------------
+      #  Upload Coverage Report
+      # --------------------------------------------------
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+      # --------------------------------------------------
+      #  DockerHub Login (Secrets)
+      # --------------------------------------------------
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --------------------------------------------------
+      #  Build Docker Image (LOCAL – no push yet)
+      # --------------------------------------------------
+      - name: Build Docker image (local)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: docker-ci-demo:scan
+
+      # --------------------------------------------------
+      #  Trivy Image Scan (Report only)
+      # --------------------------------------------------
+      - name: Trivy Image Scan (report)
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: docker-ci-demo:scan
+          format: json
+          output: trivy-report.json
+          exit-code: 0
+
+      # --------------------------------------------------
+      #  Upload Trivy Report
+      # --------------------------------------------------
+      - name: Upload Trivy report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json
+
+      # --------------------------------------------------
+      # Enforce Trivy Policy (Fail on HIGH/CRITICAL)
+      # --------------------------------------------------
+      - name: Enforce Image Security Policy
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: docker-ci-demo:scan
+          severity: CRITICAL,HIGH
+          exit-code: 1
+
+      # --------------------------------------------------
+      # Push Docker Image (Only if ALL passed)
+      # --------------------------------------------------
+      - name: Push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            shivsharma01/docker-ci-demo:latest
+            shivsharma01/docker-ci-demo:${{ github.sha }}
+
